@@ -1,9 +1,8 @@
 // Shell.
-
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
-
+#pragma GCC diagnostic ignored "-Winfinite-recursion"
 // Parsed command representation
 #define EXEC  1
 #define REDIR 2
