@@ -83,6 +83,7 @@ struct trapframe {
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
+// kernel/proc.h
 struct proc {
   struct spinlock lock;
 
@@ -98,10 +99,10 @@ struct proc {
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
-  pagetable_t kernelpt;        // ½ø³ÌµÄÄÚºËÒ³±í
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  pagetable_t kernelpgtbl;     // æ–°å»ºä¸€ä¸ªç‹¬ç«‹çš„å†…æ ¸æ€é¡µè¡¨
 };

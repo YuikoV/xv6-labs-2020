@@ -1,8 +1,9 @@
 // Shell.
+
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
-#pragma GCC diagnostic ignored "-Winfinite-recursion"
+
 // Parsed command representation
 #define EXEC  1
 #define REDIR 2
@@ -53,8 +54,7 @@ void panic(char*);
 struct cmd *parsecmd(char*);
 
 // Execute cmd.  Never returns.
-void
-runcmd(struct cmd *cmd)
+void runcmd(struct cmd *cmd)
 {
   int p[2];
   struct backcmd *bcmd;
@@ -63,25 +63,27 @@ runcmd(struct cmd *cmd)
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
 
-  if(cmd == 0)
+  if (cmd == 0)
     exit(1);
 
-  switch(cmd->type){
+  switch (cmd->type)
+  {
   default:
     panic("runcmd");
 
   case EXEC:
-    ecmd = (struct execcmd*)cmd;
-    if(ecmd->argv[0] == 0)
+    ecmd = (struct execcmd *)cmd;
+    if (ecmd->argv[0] == 0)
       exit(1);
     exec(ecmd->argv[0], ecmd->argv);
     fprintf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
 
   case REDIR:
-    rcmd = (struct redircmd*)cmd;
+    rcmd = (struct redircmd *)cmd;
     close(rcmd->fd);
-    if(open(rcmd->file, rcmd->mode) < 0){
+    if (open(rcmd->file, rcmd->mode) < 0)
+    {
       fprintf(2, "open %s failed\n", rcmd->file);
       exit(1);
     }
@@ -89,25 +91,27 @@ runcmd(struct cmd *cmd)
     break;
 
   case LIST:
-    lcmd = (struct listcmd*)cmd;
-    if(fork1() == 0)
+    lcmd = (struct listcmd *)cmd;
+    if (fork1() == 0)
       runcmd(lcmd->left);
     wait(0);
     runcmd(lcmd->right);
     break;
 
   case PIPE:
-    pcmd = (struct pipecmd*)cmd;
-    if(pipe(p) < 0)
+    pcmd = (struct pipecmd *)cmd;
+    if (pipe(p) < 0)
       panic("pipe");
-    if(fork1() == 0){
+    if (fork1() == 0)
+    {
       close(1);
       dup(p[1]);
       close(p[0]);
       close(p[1]);
       runcmd(pcmd->left);
     }
-    if(fork1() == 0){
+    if (fork1() == 0)
+    {
       close(0);
       dup(p[0]);
       close(p[0]);
@@ -121,8 +125,8 @@ runcmd(struct cmd *cmd)
     break;
 
   case BACK:
-    bcmd = (struct backcmd*)cmd;
-    if(fork1() == 0)
+    bcmd = (struct backcmd *)cmd;
+    if (fork1() == 0)
       runcmd(bcmd->cmd);
     break;
   }
