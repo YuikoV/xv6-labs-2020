@@ -30,16 +30,6 @@ procinit(void)
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
-
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
   }
   kvminithart();
 }
@@ -121,6 +111,27 @@ found:
     return 0;
   }
 
+  // Init the kernel page table for this process
+  p->kernelpt = proc_kpt_init();
+  if(p->kernelpt == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // Allocate a page for the process's kernel stack.
+  // Map it high in the process's kernel page table, followed by an invalid
+  // guard page.
+  char *pa = kalloc();
+  if(pa == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  uint64 va = KSTACK((int) (p - proc));
+  uvmmap(p->kernelpt, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -142,6 +153,15 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  // free per-process kernel stack mapping and physical page
+  if(p->kstack) {
+    uvmunmap(p->kernelpt, p->kstack, 1, 1);
+    p->kstack = 0;
+  }
+  // free per-process kernel page table
+  if(p->kernelpt)
+    proc_freekernelpt(p->kernelpt);
+  p->kernelpt = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -473,8 +493,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        // switch to the process's kernel page table for this hart
+        if(p->kernelpt)
+          proc_inithart(p->kernelpt);
         swtch(&c->context, &p->context);
 
+        // restore the global kernel page table for the hart
+        kvminithart();  // 切换回全局内核页表
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
