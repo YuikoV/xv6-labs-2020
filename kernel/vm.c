@@ -21,8 +21,8 @@ extern char trampoline[]; // trampoline.S
 void
 kvminit()
 {
-  kernel_pagetable = kvminit_newpgtbl(); // 将kvminit抽象
-  kvmmap(kernel_pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+kernel_pagetable = kvminit_newpgtbl(); // Abstract kvminit for reusable page table creation
+kvmmap(kernel_pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
 }
 
 pagetable_t
@@ -36,10 +36,10 @@ kvminit_newpgtbl()
     return pgtbl;
 }
 
-
-void kvm_map_pagetable(pagetable_t pgtbl) {
-    // 将各种内核需要的 direct mapping 添加到页表 pgtbl 中
-    
+void 
+kvm_map_pagetable(pagetable_t pgtbl)    // Add all necessary kernel direct mappings to the page table
+{
+ 
     // uart registers
     kvmmap(pgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
@@ -63,20 +63,20 @@ void kvm_map_pagetable(pagetable_t pgtbl) {
     kvmmap(pgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
-// 递归释放一个内核页表中的所有 mapping，但是不释放其指向的物理页
+// Recursively free all mappings in a kernel page table, but not the physical pages they point to
 void
-kvm_free_kernelpgtbl(pagetable_t pagetable) {
-    for (int i = 0;i < 512;++i) {
+kvm_free_kernelpgtbl(pagetable_t pagetable) 
+{
+    for (int i = 0; i < 512; ++i) {
         pte_t pte = pagetable[i];
         uint64 child = PTE2PA(pte);
-        if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {      // 如果该页表项指向更低一级的页表
-            kvm_free_kernelpgtbl((pagetable_t)child);                     // 递归释放低一级页表及其页表项
+        if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {      // Page table entry points to a lower-level page table
+            kvm_free_kernelpgtbl((pagetable_t)child);                     // Recursively free lower-level page table and its entries
             pagetable[i] = 0;
         }
     }
-    kfree((void*)pagetable);        // 释放当前级别页表所占用空间
+    kfree((void*)pagetable);        // Free the current level page table space
 }
-
 
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
@@ -157,19 +157,19 @@ kvmmap(pagetable_t pgtbl,uint64 va, uint64 pa, uint64 sz, int perm)
 // addresses on the stack.
 // assumes va is page aligned.
 uint64
-kvmpa(pagetable_t pgtbl, uint64 va)         // kvmpa 将内核逻辑地址转换为物理地址（添加第一个参数 kernelpgtbl）
+kvmpa(pagetable_t pgtbl, uint64 va)// Added first parameter for process-specific kernel page table
 {
     uint64 off = va % PGSIZE;
     pte_t *pte;
     uint64 pa;
+  pte = walk(pgtbl, va, 0);           // Use parameter pgtbl instead of global kernel_pagetable
+  if (pte == 0)
+      panic("kvmpa");
+  if ((*pte & PTE_V) == 0)
+      panic("kvmpa");
+  pa = PTE2PA(*pte);
+  return pa + off;
 
-    pte = walk(pgtbl, va, 0);			//kernel_pagetable改为参数pgtbl
-    if (pte == 0)
-        panic("kvmpa");
-    if ((*pte & PTE_V) == 0)
-        panic("kvmpa");
-    pa = PTE2PA(*pte);
-    return pa + off;
 }
 
 
@@ -421,23 +421,25 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  return copyinstr_new(pagetable, dst, srcva, max);
+return copyinstr_new(pagetable, dst, srcva, max);
 }
 
-// 辅助函数，用于递归打印页表层级
-void vmprint_recursive(pagetable_t pagetable, int level) {
-  // 遍历当前页表的512个PTE
+// Helper function to recursively print page table hierarchy
+void 
+vmprint_recursive(pagetable_t pagetable, int level) 
+{
+  // Traverse all 512 PTEs in the current page table
   for (int i = 0; i < 512; i++) {
     pte_t pte = pagetable[i];
-    // 检查PTE是否有效（PTE_V标志位被设置）
+    // Check if PTE is valid (PTE_V flag is set)
     if (pte & PTE_V) {
-      // 打印缩进（".."数量表示层级深度）
+      // Print indentation (".." indicates hierarchy depth)
       for (int j = 0; j < level; j++) {
         printf(".. ");
       }
-      // 打印PTE索引、完整PTE值和对应的物理地址
+      // Print PTE index, full PTE value, and corresponding physical address
       printf("..%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
-      // 如果当前不是最后一级（level < 2），递归打印下一级页表
+      // If not the last level (level < 2), recursively print next level
       if (level < 2) {
         uint64 child_pa = PTE2PA(pte);
         vmprint_recursive((pagetable_t)child_pa, level + 1);
@@ -446,30 +448,32 @@ void vmprint_recursive(pagetable_t pagetable, int level) {
   }
 }
 
-// Lab3_1
-// 主打印函数
-void vmprint(pagetable_t pagetable) {
+//Main print function for page table
+void 
+vmprint(pagetable_t pagetable) 
+{
   printf("page table %p\n", pagetable);
-  vmprint_recursive(pagetable, 0);  // 从顶级页表（深度0）开始递归
+  vmprint_recursive(pagetable, 0);  // Start recursion from top-level page table (depth 0)
 }
 
-// Lab3_3
-// 将 src 页表的一部分页映射关系拷贝到 dst 页表中
+// Lab3_3: Copy page mappings from src page table to dst page table
 int
-kvmcopy(pagetable_t src, pagetable_t dst, uint64 start, uint64 sz) {
+kvmcopy(pagetable_t src, pagetable_t dst, uint64 start, uint64 sz) 
+{
     pte_t* pte;
     uint64 pa, i;
     uint flags;
 
-    // PGROUNDUP: 将地址向上取整到页边界，防止重新映射已经映射的页，特别是在执行growproc操作时
-    for (i = PGROUNDUP(start);i < start + sz;i += PGSIZE) {
+    // PGROUNDUP: align address to page boundary to avoid remapping already mapped pages,
+    // especially during growproc operations
+    for (i = PGROUNDUP(start); i < start + sz; i += PGSIZE) {
         if ((pte = walk(src, i, 0)) == 0)
             panic("kvmcopy: pte should exist");
         if ((*pte & PTE_V) == 0)
             panic("kvmcopy: page not present");
         pa = PTE2PA(*pte);
 
-        // `& ~PTE_U` 表示将该页的权限设置为非用户页
+        // `& ~PTE_U` removes user permission bit, making it a kernel page
         flags = PTE_FLAGS(*pte) & ~PTE_U;
         if (mappages(dst, i, PGSIZE, pa, flags) != 0)
             goto err;
@@ -478,14 +482,15 @@ kvmcopy(pagetable_t src, pagetable_t dst, uint64 start, uint64 sz) {
     return 0;
 
 err:
-    uvmunmap(dst, PGROUNDUP(start), (i - PGROUNDUP(start)) / PGSIZE, 0);            //解除目标页表中已映射的页表项
+    // Unmap already mapped pages in destination page table on error
+    uvmunmap(dst, PGROUNDUP(start), (i - PGROUNDUP(start)) / PGSIZE, 0);
     return -1;
 }
 
-
-// 与 uvmdealloc 功能类似
+// Similar to uvmdealloc, but for kernel page tables
 uint64
-kvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz) {
+kvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz) 
+{
     if (newsz >= oldsz)
         return oldsz;
 
@@ -496,3 +501,4 @@ kvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz) {
 
     return newsz;
 }
+

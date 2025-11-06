@@ -31,16 +31,6 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
 
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-
-      // char *pa = kalloc();
-      // if(pa == 0)
-      //   panic("kalloc");
-      // uint64 va = KSTACK((int) (p - proc));
-      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      // p->kstack = va;
   }
   kvminithart();
 }
@@ -121,17 +111,17 @@ found:
     release(&p->lock);
     return 0;
   }
+  p->kernelpgtbl = kvminit_newpgtbl();
 
-  // 为新进程创建独立的内核页表，并将内核所需要的各种映射添加到新页表上
-    p->kernelpgtbl = kvminit_newpgtbl();
+  // Allocate a physical page to serve as the new process's kernel stack
+  char* pa = kalloc();
+  if (pa == 0)
+    panic("kalloc");
 
-    // 分配一个物理页，作为新进程的内核栈使用
-    char* pa = kalloc();
-    if (pa == 0)
-        panic("kallo");
-    uint64 va = KSTACK((int)0);     // 将内核栈映射到固定的逻辑地址上
-    kvmmap(p->kernelpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-    p->kstack = va;     // 记录内核栈的逻辑地址，其实已经是固定的了，依然这样记录是为了避免需要修改其他部分 xv6 代码
+
+  uint64 va = KSTACK((int)0);     // Map the kernel stack to a fixed virtual address
+  kvmmap(p->kernelpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;     // Record the kernel stack's virtual address. 
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -154,6 +144,14 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  // Free the process's kernel stack
+  void* kstack_pa = (void*)kvmpa(p->kernelpgtbl, p->kstack);
+  kfree(kstack_pa);
+  p->kstack = 0;
+
+  // Recursively free the process's exclusive kernel page table
+  kvm_free_kernelpgtbl(p->kernelpgtbl);
+  p->kernelpgtbl = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -161,14 +159,6 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
-  //释放进程的内核栈
-  void* kstack_pa = (void*)kvmpa(p->kernelpgtbl, p->kstack);
-  kfree(kstack_pa);
-  p->kstack = 0;
-
-  // 递归释放进程独享的页表
-  kvm_free_kernelpgtbl(p->kernelpgtbl);
-  p->kernelpgtbl = 0;
   p->state = UNUSED;
 }
 
@@ -240,7 +230,8 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
-  kvmcopy(p->pagetable, p->kernelpgtbl, 0, p->sz);      // 同步程序内存映射到进程内核页表中
+  // Copy user page table mappings to kernel page table for direct kernel access
+  kvmcopy(p->pagetable, p->kernelpgtbl, 0, p->sz);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -263,23 +254,22 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
-  if (n > 0) {
-      uint64 newsz;
-      if ((newsz = uvmalloc(p->pagetable, sz, sz + n)) == 0)
-          return -1;
-
-      // 内核页表中的映射同步扩大
-      if (kvmcopy(p->pagetable, p->kernelpgtbl, sz, n) != 0) {
-          uvmdealloc(p->pagetable, newsz, sz);
-          return -1;
-      }
-      sz = newsz;
-  }
-  else if (n < 0) {
-      uvmdealloc(p->pagetable, sz, sz + n);
-      // 内核页表中的映射同步缩小
-      sz = kvmdealloc(p->kernelpgtbl, sz, sz + n);
-  }
+if (n > 0) {
+    uint64 newsz;
+    if ((newsz = uvmalloc(p->pagetable, sz, sz + n)) == 0)
+        return -1;
+    // Synchronously expand mappings in kernel page table
+    if (kvmcopy(p->pagetable, p->kernelpgtbl, sz, n) != 0) {
+        uvmdealloc(p->pagetable, newsz, sz);
+        return -1;
+    }
+    sz = newsz;
+}
+else if (n < 0) {
+    uvmdealloc(p->pagetable, sz, sz + n);
+    // Synchronously shrink mappings in kernel page table
+    sz = kvmdealloc(p->kernelpgtbl, sz, sz + n);
+}
   p->sz = sz;
   return 0;
 }
@@ -298,7 +288,7 @@ fork(void)
     return -1;
   }
 
-  // Copy user memory from parent to child.  加入调用kvmcopy
+   // Copy user memory from parent to child, and sync to child's kernel page table
   if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0 || kvmcopy(np->pagetable, np->kernelpgtbl, 0, p->sz) < 0) {
     freeproc(np);
     release(&np->lock);
@@ -504,15 +494,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-
-        // 切换到进程独立的内核页表
-        w_satp(MAKE_SATP(p->kernelpgtbl));
-        sfence_vma();       // 清除快表缓存，刷新TLB缓存，以确保地址转换表的更改生效
+        w_satp(MAKE_SATP(p->kernelpgtbl));// Switch to process's independent kernel page table
+        sfence_vma();// Flush TLB
 
         swtch(&c->context, &p->context);
 
-        // 切换回全局内核页表
-        kvminithart();
+        // restore the global kernel page table for the hart
+        kvminithart();  // 切换回全局内核页表
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
