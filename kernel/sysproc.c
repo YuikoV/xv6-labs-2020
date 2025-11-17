@@ -43,12 +43,26 @@ sys_sbrk(void)
 {
   int addr;
   int n;
+  struct proc *p = myproc();
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  
+  addr = p->sz;
+  
+  if(n > 0) {
+    // 检查新大小是否超出限制
+    if(p->sz + n > MAXVA || p->sz + n < 0) {
+      return -1;
+    }
+    p->sz += n;
+  } else if(n < 0) {
+    if(p->sz + n < 0) {
+      return -1;
+    }
+    p->sz = uvmdealloc(p->pagetable, p->sz, p->sz + n);
+  }
+  
   return addr;
 }
 

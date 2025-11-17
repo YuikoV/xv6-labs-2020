@@ -4,6 +4,8 @@
 #include "elf.h"
 #include "riscv.h"
 #include "defs.h"
+#include "spinlock.h" 
+#include "proc.h"  
 #include "fs.h"
 
 /*
@@ -181,9 +183,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;  // 改这里：原来是 panic，现在改为 continue
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;  // 改这里：原来是 panic，现在改为 continue
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -283,10 +285,13 @@ freewalk(pagetable_t pagetable)
       freewalk((pagetable_t)child);
       pagetable[i] = 0;
     } else if(pte & PTE_V){
-      panic("freewalk: leaf");
+      // 修改：如果是叶子节点且仍然有效，释放它
+      uint64 pa = PTE2PA(pte);
+      kfree((void*)pa);
+      pagetable[i] = 0;
     }
   }
-  kfree((void*)pagetable);
+  kfree((pagetable_t)pagetable);
 }
 
 // Free user memory pages,
@@ -315,9 +320,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;  // 添加这行：跳过未映射的页面
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;  // 添加这行：跳过无效的页面
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -355,12 +360,31 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  struct proc *p = myproc();
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    
+    if(pa0 == 0) {
+      // 尝试 lazy allocation
+      if(va0 < p->sz) {
+        char *mem = kalloc();
+        if(mem == 0)
+          return -1;
+        memset(mem, 0, PGSIZE);
+        if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+          kfree(mem);
+          return -1;
+        }
+        pa0 = walkaddr(pagetable, va0);
+        if(pa0 == 0)
+          return -1;
+      } else {
+        return -1;
+      }
+    }
+    
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -380,12 +404,33 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
+  struct proc *p = myproc();
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    
+    if(pa0 == 0) {
+      // 尝试 lazy allocation
+      if(va0 < p->sz) {
+        // 在有效地址范围内，分配页面
+        char *mem = kalloc();
+        if(mem == 0)
+          return -1;
+        memset(mem, 0, PGSIZE);
+        if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+          kfree(mem);
+          return -1;
+        }
+        // 重新获取物理地址
+        pa0 = walkaddr(pagetable, va0);
+        if(pa0 == 0)
+          return -1;
+      } else {
+        return -1;
+      }
+    }
+    
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
@@ -397,7 +442,6 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   }
   return 0;
 }
-
 // Copy a null-terminated string from user to kernel.
 // Copy bytes to dst from virtual address srcva in a given page table,
 // until a '\0', or max.

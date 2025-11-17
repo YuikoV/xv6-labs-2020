@@ -41,33 +41,58 @@ usertrap(void)
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
   
-  // save user program counter.
   p->trapframe->epc = r_sepc();
   
   if(r_scause() == 8){
     // system call
-
     if(p->killed)
       exit(-1);
 
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
     p->trapframe->epc += 4;
-
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
     intr_on();
-
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } 
+  else if(r_scause() == 13 || r_scause() == 15) {
+    // Page fault: 13 = load, 15 = store/AMO
+    uint64 va = r_stval();
+    
+    // 检查1：地址超出进程大小
+    if(va >= p->sz) {
+      p->killed = 1;
+    }
+    else {
+      va = PGROUNDDOWN(va);
+      
+      // 检查2：页面是否已经映射
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(pte != 0 && (*pte & PTE_V)) {
+        // 页面已经存在但仍然触发 page fault
+        // 可能是权限问题或其他错误
+        p->killed = 1;
+      }
+      else {
+        // Lazy allocation
+        char *mem = kalloc();
+        if(mem == 0) {
+          p->killed = 1;
+        } else {
+          memset(mem, 0, PGSIZE);
+          if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+            kfree(mem);
+            p->killed = 1;
+          }
+        }
+      }
+    }
+  }
+  else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } 
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -76,7 +101,6 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
 
