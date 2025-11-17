@@ -59,6 +59,37 @@ printptr(uint64 x)
     consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
+void
+backtrace(void)
+{
+  printf("backtrace:\n");
+  
+  // 读取当前帧指针
+  uint64 fp = r_fp();
+  
+  // 获取栈的上下界
+  uint64 stack_top = PGROUNDUP(fp);
+  uint64 stack_bottom = PGROUNDDOWN(fp);
+  
+  // 遍历栈帧链表
+  while (stack_top - stack_bottom == PGSIZE) {
+    // 返回地址保存在 fp-8 的位置
+    uint64 ret_addr = *(uint64*)(fp - 8);
+    printf("%p\n", ret_addr);
+    
+    // 前一个帧指针保存在 fp-16 的位置
+    uint64 prev_fp = *(uint64*)(fp - 16);
+    
+    // 检查前一个帧指针是否有效
+    if (prev_fp == 0 || prev_fp <= fp) {
+      break;
+    }
+    
+    fp = prev_fp;
+    stack_top = PGROUNDUP(fp);
+    stack_bottom = PGROUNDDOWN(fp);
+  }
+}
 // Print to the console. only understands %d, %x, %p, %s.
 void
 printf(char *fmt, ...)
