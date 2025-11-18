@@ -31,6 +31,25 @@ barrier()
   // then increment bstate.round.
   //
   
+  pthread_mutex_lock(&bstate.barrier_mutex);
+  
+  bstate.nthread++;
+  
+  if(bstate.nthread == nthread) {
+    // 所有线程都已到达屏障
+    bstate.round++;        // 进入下一轮
+    bstate.nthread = 0;    // 重置计数器
+    pthread_cond_broadcast(&bstate.barrier_cond);  // 唤醒所有等待的线程
+  } else {
+    // 还有线程未到达，当前线程需要等待
+    // pthread_cond_wait 会：
+    // 1. 释放 mutex
+    // 2. 进入睡眠
+    // 3. 被唤醒后重新获取 mutex
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }
+  
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
