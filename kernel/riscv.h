@@ -1,3 +1,5 @@
+#define PTE_F (1L << 8)  // COW ForkÒ³Ãæ±êÖ¾
+
 // which hart (core) is this?
 static inline uint64
 r_mhartid()

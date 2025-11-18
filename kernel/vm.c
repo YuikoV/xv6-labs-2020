@@ -311,28 +311,33 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+
+    // 修改：对可写页面应用COW策略
+    if(flags & PTE_W) {
+      // 清除写权限，设置COW标志
+      flags = (flags | PTE_F) & ~PTE_W;
+      *pte = PA2PTE(pa) | flags;  // 更新父进程的PTE
     }
+
+    // 子进程映射到同一物理页面（而不是分配新页面）
+    if(mappages(new, i, PGSIZE, pa, flags) != 0) {
+      uvmunmap(new, 0, i / PGSIZE, 1);
+      return -1;
+    }
+    
+    // 增加物理页面的引用计数
+    kaddrefcnt((char*)pa);
   }
   return 0;
-
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -359,8 +364,16 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
+    
+    // 新增：检查是否为COW页面
+    if(cowpage(pagetable, va0) == 0) {
+      // 是COW页面，需要先分配新页面
+      pa0 = (uint64)cowalloc(pagetable, va0);
+    }
+    
     if(pa0 == 0)
       return -1;
+    
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
