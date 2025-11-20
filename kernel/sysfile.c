@@ -368,6 +368,61 @@ sys_mkdir(void)
 }
 
 uint64
+sys_mmap(void) {
+  uint64 addr;
+  int length;
+  int prot;
+  int flags;
+  int vfd;
+  struct file* vfile;
+  int offset;
+  uint64 err = 0xffffffffffffffff;
+
+  // 获取系统调用参数
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 || 
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 || 
+     argfd(4, &vfd, &vfile) < 0 || argint(5, &offset) < 0)
+    return err;
+
+  // 实验假定 addr 和 offset 为 0
+  if(addr != 0 || offset != 0 || length < 0)
+    return err;
+
+  // 文件不可写则不允许 PROT_WRITE + MAP_SHARED
+  if(vfile->writable == 0 && (prot & PROT_WRITE) != 0 && flags == MAP_SHARED)
+    return err;
+
+  struct proc* p = myproc();
+  
+  // 没有足够的虚拟地址空间
+  if(p->sz + length > MAXVA)
+    return err;
+
+  // 查找未使用的 VMA
+  for(int i = 0; i < NVMA; ++i) {
+    if(p->vma[i].used == 0) {
+      p->vma[i].used = 1;
+      p->vma[i].addr = p->sz;
+      p->vma[i].len = length;
+      p->vma[i].flags = flags;
+      p->vma[i].prot = prot;
+      p->vma[i].vfile = vfile;
+      p->vma[i].vfd = vfd;
+      p->vma[i].offset = offset;
+
+      // 增加文件引用计数
+      filedup(vfile);
+
+      // 增加进程的虚拟地址空间大小
+      p->sz += length;
+      return p->vma[i].addr;
+    }
+  }
+
+  return err;
+}
+
+uint64
 sys_mknod(void)
 {
   struct inode *ip;
@@ -482,5 +537,52 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_munmap(void) {
+  uint64 addr;
+  int length;
+  
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  int i;
+  struct proc* p = myproc();
+  
+  // 查找对应的 VMA
+  for(i = 0; i < NVMA; ++i) {
+    if(p->vma[i].used && p->vma[i].len >= length) {
+      // 在起始位置取消映射
+      if(p->vma[i].addr == addr) {
+        p->vma[i].addr += length;
+        p->vma[i].len -= length;
+        break;
+      }
+      // 在结束位置取消映射
+      if(addr + length == p->vma[i].addr + p->vma[i].len) {
+        p->vma[i].len -= length;
+        break;
+      }
+    }
+  }
+  if(i == NVMA)
+    return -1;
+
+  // MAP_SHARED 需要写回文件
+  if(p->vma[i].flags == MAP_SHARED && (p->vma[i].prot & PROT_WRITE) != 0) {
+    filewrite(p->vma[i].vfile, addr, length);
+  }
+
+  // 取消页表映射
+  uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+
+  // 如果整个区域都被取消映射
+  if(p->vma[i].len == 0) {
+    fileclose(p->vma[i].vfile);
+    p->vma[i].used = 0;
+  }
+
   return 0;
 }

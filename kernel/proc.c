@@ -133,7 +133,7 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
+  memset(&p->vma, 0, sizeof(p->vma));
   return p;
 }
 
@@ -296,6 +296,14 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // 复制 VMA
+  for(i = 0; i < NVMA; ++i) {
+    if(p->vma[i].used) {
+      memmove(&np->vma[i], &p->vma[i], sizeof(p->vma[i]));
+      filedup(p->vma[i].vfile);  // 增加文件引用计数
+    }
+  }
+  
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -343,7 +351,19 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
-
+  
+  // 关闭文件前，先处理 VMA
+  for(int i = 0; i < NVMA; ++i) {
+    if(p->vma[i].used) {
+      // MAP_SHARED 需要写回
+      if(p->vma[i].flags == MAP_SHARED && (p->vma[i].prot & PROT_WRITE) != 0) {
+        filewrite(p->vma[i].vfile, p->vma[i].addr, p->vma[i].len);
+      }
+      fileclose(p->vma[i].vfile);
+      uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].len / PGSIZE, 1);
+      p->vma[i].used = 0;
+    }
+  }
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
